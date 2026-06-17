@@ -133,43 +133,70 @@ window.addEventListener("error", function (e) {
     var nms = useState(""), name = nms[0], setName = nms[1];
     var svs = useState(false), saving = svs[0], setSaving = svs[1];
     var busy = useState(false), processing = busy[0], setProcessing = busy[1];
+    var dgs = useState(""), diag = dgs[0], setDiag = dgs[1];
     var fileRef = useRef(null);
+
+    function processBitmap(srcCanvasSource, iw, ih, cleanup) {
+      var r = RATIOS[ratio];
+      var sw = iw, sh = iw / r;
+      if (sh > ih) { sh = ih; sw = ih * r; }
+      var sx = (iw - sw)/2, sy = (ih - sh)/2;
+      var maxSide = 1000, scale = Math.min(1, maxSide / Math.max(sw, sh));
+      var cw = Math.round(sw*scale), ch = Math.round(sh*scale);
+      var canvas = document.createElement("canvas");
+      canvas.width = cw; canvas.height = ch;
+      var ctx = canvas.getContext("2d");
+      ctx.drawImage(srcCanvasSource, sx, sy, sw, sh, 0, 0, cw, ch);
+      var grain = ctx.createImageData(cw, ch);
+      for (var i=0; i<grain.data.length; i+=4) {
+        var n = (Math.random()*255)|0;
+        grain.data[i]=grain.data[i+1]=grain.data[i+2]=n;
+        grain.data[i+3] = Math.random()<0.06 ? 20 : 0;
+      }
+      ctx.globalAlpha = 0.5; ctx.putImageData(grain,0,0); ctx.globalAlpha = 1;
+      var url = canvas.toDataURL("image/jpeg", 0.72);
+      if (cleanup) cleanup();
+      setCaptured(url);
+      setProcessing(false);
+      setDiag("");
+    }
 
     function onFile(ev) {
       var file = ev.target.files && ev.target.files[0];
-      if (!file) return;
+      if (!file) { setDiag("Tidak ada file yang dipilih."); return; }
       setProcessing(true);
-      var img = new Image();
-      img.onload = function () {
-        var r = RATIOS[ratio], iw = img.width, ih = img.height;
-        var sw = iw, sh = iw / r;
-        if (sh > ih) { sh = ih; sw = ih * r; }
-        var sx = (iw - sw)/2, sy = (ih - sh)/2;
-        var maxSide = 1000, scale = Math.min(1, maxSide / Math.max(sw, sh));
-        var cw = Math.round(sw*scale), ch = Math.round(sh*scale);
-        var canvas = document.createElement("canvas");
-        canvas.width = cw; canvas.height = ch;
-        var ctx = canvas.getContext("2d");
-        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
-        var grain = ctx.createImageData(cw, ch);
-        for (var i=0; i<grain.data.length; i+=4) {
-          var n = (Math.random()*255)|0;
-          grain.data[i]=grain.data[i+1]=grain.data[i+2]=n;
-          grain.data[i+3] = Math.random()<0.06 ? 20 : 0;
-        }
-        ctx.globalAlpha = 0.5; ctx.putImageData(grain,0,0); ctx.globalAlpha = 1;
-        var url = canvas.toDataURL("image/jpeg", 0.72);
-        URL.revokeObjectURL(img.src);
-        setCaptured(url);
-        setProcessing(false);
-      };
-      img.onerror = function () { setProcessing(false); alert("Gagal membaca foto. Coba lagi ya."); };
-      img.src = URL.createObjectURL(file);
+      setDiag("Memproses: " + (file.type || "tipe?") + ", " + Math.round(file.size/1024) + " KB");
+
+      // Prefer createImageBitmap (handles many formats incl. some HEIC on modern browsers)
+      if (window.createImageBitmap) {
+        createImageBitmap(file).then(function (bmp) {
+          processBitmap(bmp, bmp.width, bmp.height, function(){ bmp.close && bmp.close(); });
+        }).catch(function (e1) {
+          // fallback to <img> + object URL
+          tryImgTag(file, "createImageBitmap gagal: " + (e1 && e1.message));
+        });
+      } else {
+        tryImgTag(file, "");
+      }
       ev.target.value = "";
     }
 
+    function tryImgTag(file, prevErr) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        processBitmap(img, img.naturalWidth, img.naturalHeight, function(){ URL.revokeObjectURL(url); });
+      };
+      img.onerror = function () {
+        URL.revokeObjectURL(url);
+        setProcessing(false);
+        setDiag("Foto tidak terbaca (kemungkinan format HEIC). " + (prevErr||"") + " — Coba ubah Setelan Kamera iPhone ke 'Paling Kompatibel' (JPEG), lalu foto lagi.");
+      };
+      img.src = url;
+    }
+
     function openCamera() { if (fileRef.current) fileRef.current.click(); }
-    function retake() { setCaptured(null); setNote(""); }
+    function retake() { setCaptured(null); setNote(""); setDiag(""); }
     function keep() {
       setSaving(true);
       var shot = { id: Date.now().toString(36)+Math.random().toString(36).slice(2,6), img:captured, note:note.trim(), name:name.trim(), filter:filter, ratio:ratio, t:Date.now(), stamp:nowStamp() };
@@ -188,13 +215,14 @@ window.addEventListener("error", function (e) {
       e("div", { style:{ position:"absolute", right:10, bottom:8, color:C.stampGreen, fontSize:15, letterSpacing:1, textShadow:"0 0 4px rgba(126,224,106,0.6)" } }, nowStamp())
     );
 
+    var diagEl = diag ? e("div", { style:{ marginTop:10, padding:"10px 12px", background:"#fff", border:"1px solid "+C.ink, fontSize:11, lineHeight:1.6, color:C.ink } }, diag) : null;
+
     var controls = !captured
       ? [ e(Label, { key:"l0" }, "Ukuran"),
           e(Chips, { key:"c0", options:Object.keys(RATIOS), value:ratio, onChange:setRatio }),
           e(Label, { key:"l1" }, "Filter film"),
           e(Chips, { key:"c1", options:Object.keys(FILTERS), value:filter, onChange:setFilter }),
-          e("button", { key:"open", onClick:openCamera, disabled:processing, style:Object.assign({}, bigBtn(C.red, C.flash), { opacity:processing?0.5:1 }) }, processing ? "..." : "\u29BF BUKA KAMERA"),
-          e("p", { key:"hint", style:{ fontSize:11, opacity:0.6, marginTop:12, lineHeight:1.5 } }, "Pilih ukuran & filter dulu, lalu buka kamera. Filter diterapkan setelah kamu foto.") ]
+          e("button", { key:"open", onClick:openCamera, disabled:processing, style:Object.assign({}, bigBtn(C.red, C.flash), { opacity:processing?0.5:1 }) }, processing ? "..." : "\u29BF BUKA KAMERA") ]
       : [ e(Label, { key:"l3" }, "Nama kamu (opsional)"),
           e("input", { key:"in", value:name, onChange:function(ev){ setName(ev.target.value); }, placeholder:"mis. Tante Rina", style:inputStyle }),
           e(Label, { key:"l4" }, "Pesan buat pengantin"),
@@ -204,7 +232,7 @@ window.addEventListener("error", function (e) {
             e("button", { onClick:keep, disabled:saving, style:Object.assign({}, bigBtn(C.kodak, C.ink), { flex:1.6, opacity:saving?0.5:1 }) }, saving ? "..." : "\u2713 Kirim ke galeri")
           ) ];
 
-    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), hiddenInput, camBox, controls);
+    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), hiddenInput, camBox, diagEl, controls);
   }
 
 
