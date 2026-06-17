@@ -132,11 +132,12 @@ window.addEventListener("error", function (e) {
     var ns = useState(""), note = ns[0], setNote = ns[1];
     var nms = useState(""), name = nms[0], setName = nms[1];
     var svs = useState(false), saving = svs[0], setSaving = svs[1];
-    var busy = useState(false), processing = busy[0], setProcessing = busy[1];
     var dgs = useState(""), diag = dgs[0], setDiag = dgs[1];
     var fileRef = useRef(null);
 
-    function processBitmap(srcCanvasSource, iw, ih, cleanup) {
+    function buildFromImg(img) {
+      var iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+      if (!iw || !ih) { setDiag("GAGAL: ukuran gambar 0x0 (foto tidak terbaca browser)."); return; }
       var r = RATIOS[ratio];
       var sw = iw, sh = iw / r;
       if (sh > ih) { sh = ih; sw = ih * r; }
@@ -146,7 +147,7 @@ window.addEventListener("error", function (e) {
       var canvas = document.createElement("canvas");
       canvas.width = cw; canvas.height = ch;
       var ctx = canvas.getContext("2d");
-      ctx.drawImage(srcCanvasSource, sx, sy, sw, sh, 0, 0, cw, ch);
+      ctx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
       var grain = ctx.createImageData(cw, ch);
       for (var i=0; i<grain.data.length; i+=4) {
         var n = (Math.random()*255)|0;
@@ -155,47 +156,27 @@ window.addEventListener("error", function (e) {
       }
       ctx.globalAlpha = 0.5; ctx.putImageData(grain,0,0); ctx.globalAlpha = 1;
       var url = canvas.toDataURL("image/jpeg", 0.72);
-      if (cleanup) cleanup();
+      setDiag("OK: gambar " + iw + "x" + ih + " terbaca, hasil " + Math.round(url.length/1024) + " KB. Klik 'Kirim ke galeri'.");
       setCaptured(url);
-      setProcessing(false);
-      setDiag("");
     }
 
     function onFile(ev) {
       var file = ev.target.files && ev.target.files[0];
-      if (!file) { setDiag("Tidak ada file yang dipilih."); return; }
-      setProcessing(true);
-      setDiag("Memproses: " + (file.type || "tipe?") + ", " + Math.round(file.size/1024) + " KB");
-
-      // Prefer createImageBitmap (handles many formats incl. some HEIC on modern browsers)
-      if (window.createImageBitmap) {
-        createImageBitmap(file).then(function (bmp) {
-          processBitmap(bmp, bmp.width, bmp.height, function(){ bmp.close && bmp.close(); });
-        }).catch(function (e1) {
-          // fallback to <img> + object URL
-          tryImgTag(file, "createImageBitmap gagal: " + (e1 && e1.message));
-        });
-      } else {
-        tryImgTag(file, "");
-      }
+      if (!file) { setDiag("Tidak ada file."); return; }
+      setDiag("Baca file: " + (file.type||"?") + " " + Math.round(file.size/1024) + " KB...");
+      var reader = new FileReader();
+      reader.onload = function () {
+        var img = new Image();
+        img.onload = function () { buildFromImg(img); };
+        img.onerror = function () { setDiag("GAGAL render: format " + (file.type||"?") + " tidak didukung browser ini. Pastikan foto JPEG."); };
+        img.src = reader.result; // data URL
+      };
+      reader.onerror = function () { setDiag("GAGAL baca file (FileReader error)."); };
+      reader.readAsDataURL(file);
       ev.target.value = "";
     }
 
-    function tryImgTag(file, prevErr) {
-      var url = URL.createObjectURL(file);
-      var img = new Image();
-      img.onload = function () {
-        processBitmap(img, img.naturalWidth, img.naturalHeight, function(){ URL.revokeObjectURL(url); });
-      };
-      img.onerror = function () {
-        URL.revokeObjectURL(url);
-        setProcessing(false);
-        setDiag("Foto tidak terbaca (kemungkinan format HEIC). " + (prevErr||"") + " — Coba ubah Setelan Kamera iPhone ke 'Paling Kompatibel' (JPEG), lalu foto lagi.");
-      };
-      img.src = url;
-    }
-
-    function openCamera() { if (fileRef.current) fileRef.current.click(); }
+    function openCamera() { setDiag("Membuka kamera..."); if (fileRef.current) fileRef.current.click(); }
     function retake() { setCaptured(null); setNote(""); setDiag(""); }
     function keep() {
       setSaving(true);
@@ -205,24 +186,24 @@ window.addEventListener("error", function (e) {
 
     var hiddenInput = e("input", { ref:fileRef, type:"file", accept:"image/*", capture:"environment", onChange:onFile, style:{ display:"none" } });
 
+    var diagEl = e("div", { style:{ marginBottom:12, padding:"10px 12px", background:(diag.indexOf("GAGAL")===0?"#ffe2dd":"#fff"), border:"1px solid "+C.ink, fontSize:12, lineHeight:1.6, color:C.ink, minHeight:18 } }, diag ? diag : "Status muncul di sini setelah kamu foto.");
+
     var placeholder = e("div", { onClick:openCamera, style:{ position:"absolute", inset:0, display:"grid", placeItems:"center", cursor:"pointer", textAlign:"center", padding:24 } },
       e("div", { style:{ color:C.flash } },
-        e("div", { style:{ fontSize:38, marginBottom:10 } }, processing ? "\u23F3" : "\uD83D\uDCF7"),
-        e("div", { style:{ fontSize:13, letterSpacing:1, lineHeight:1.6, opacity:0.85 } }, processing ? "memproses foto..." : "ketuk untuk buka kamera")));
+        e("div", { style:{ fontSize:38, marginBottom:10 } }, "\uD83D\uDCF7"),
+        e("div", { style:{ fontSize:13, letterSpacing:1, lineHeight:1.6, opacity:0.85 } }, "ketuk untuk buka kamera")));
 
     var camBox = e("div", { style:{ position:"relative", background:C.ink, border:"1px solid "+C.ink, aspectRatio:String(RATIOS[ratio]), overflow:"hidden", boxShadow:"6px 6px 0 "+C.shadow } },
       captured ? e("img", { src:captured, alt:"", style:{ width:"100%", height:"100%", objectFit:"cover", filter:FILTERS[filter] } }) : placeholder,
       e("div", { style:{ position:"absolute", right:10, bottom:8, color:C.stampGreen, fontSize:15, letterSpacing:1, textShadow:"0 0 4px rgba(126,224,106,0.6)" } }, nowStamp())
     );
 
-    var diagEl = diag ? e("div", { style:{ marginTop:10, padding:"10px 12px", background:"#fff", border:"1px solid "+C.ink, fontSize:11, lineHeight:1.6, color:C.ink } }, diag) : null;
-
     var controls = !captured
       ? [ e(Label, { key:"l0" }, "Ukuran"),
           e(Chips, { key:"c0", options:Object.keys(RATIOS), value:ratio, onChange:setRatio }),
           e(Label, { key:"l1" }, "Filter film"),
           e(Chips, { key:"c1", options:Object.keys(FILTERS), value:filter, onChange:setFilter }),
-          e("button", { key:"open", onClick:openCamera, disabled:processing, style:Object.assign({}, bigBtn(C.red, C.flash), { opacity:processing?0.5:1 }) }, processing ? "..." : "\u29BF BUKA KAMERA") ]
+          e("button", { key:"open", onClick:openCamera, style:bigBtn(C.red, C.flash) }, "\u29BF BUKA KAMERA") ]
       : [ e(Label, { key:"l3" }, "Nama kamu (opsional)"),
           e("input", { key:"in", value:name, onChange:function(ev){ setName(ev.target.value); }, placeholder:"mis. Tante Rina", style:inputStyle }),
           e(Label, { key:"l4" }, "Pesan buat pengantin"),
@@ -232,7 +213,7 @@ window.addEventListener("error", function (e) {
             e("button", { onClick:keep, disabled:saving, style:Object.assign({}, bigBtn(C.kodak, C.ink), { flex:1.6, opacity:saving?0.5:1 }) }, saving ? "..." : "\u2713 Kirim ke galeri")
           ) ];
 
-    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), hiddenInput, camBox, diagEl, controls);
+    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), hiddenInput, diagEl, camBox, controls);
   }
 
 
