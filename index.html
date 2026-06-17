@@ -126,7 +126,7 @@ window.addEventListener("error", function (e) {
   }
 
   function Camera(p) {
-    var videoRef = useRef(null), streamRef = useRef(null);
+    var videoRef = useRef(null), streamRef = useRef(null), canvasRef = useRef(null);
     var rs = useState("4:3"), ratio = rs[0], setRatio = rs[1];
     var fs = useState("Flash"), filter = fs[0], setFilter = fs[1];
     var cs = useState(null), captured = cs[0], setCaptured = cs[1];
@@ -135,67 +135,71 @@ window.addEventListener("error", function (e) {
     var es = useState(""), err = es[0], setErr = es[1];
     var fls = useState(false), flashing = fls[0], setFlashing = fls[1];
     var svs = useState(false), saving = svs[0], setSaving = svs[1];
-    var dbs = useState(""), dbg = dbs[0], setDbg = dbs[1];
+    var rds = useState(false), ready = rds[0], setReady = rds[1];
 
-    var startCam = useCallback(function () {
-      setErr("");
+    // Start camera ONCE on mount; stop ONCE on unmount. No re-runs.
+    useEffect(function () {
+      var stopped = false;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        setErr("Browser ini nggak dukung kamera. Coba buka di Safari/Chrome lewat HTTPS."); return;
+        setErr("Browser ini nggak dukung kamera. Buka di Chrome/Safari lewat HTTPS."); return;
       }
-      navigator.mediaDevices.getUserMedia({ video:{ facingMode:"environment", width:{ideal:1280}, height:{ideal:1280} }, audio:false })
+      navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:"environment" }, width:{ideal:1920}, height:{ideal:1920} }, audio:false })
         .then(function (stream) {
+          if (stopped) { stream.getTracks().forEach(function(t){ t.stop(); }); return; }
           streamRef.current = stream;
-          if (videoRef.current) { videoRef.current.srcObject = stream; videoRef.current.play().catch(function(){}); }
+          var v = videoRef.current;
+          if (v) {
+            v.srcObject = stream;
+            v.onloadedmetadata = function () { v.play().then(function(){ setReady(true); }).catch(function(){ setReady(true); }); };
+          }
         })
-        .catch(function () { setErr("Nggak bisa akses kamera. Aktifin izin kamera & pastikan buka lewat HTTPS."); });
+        .catch(function () { setErr("Nggak bisa akses kamera. Aktifin izin kamera di pengaturan browser."); });
+      return function () {
+        stopped = true;
+        if (streamRef.current) streamRef.current.getTracks().forEach(function (t) { t.stop(); });
+        streamRef.current = null;
+      };
     }, []);
-    var stopCam = useCallback(function () {
-      if (streamRef.current) streamRef.current.getTracks().forEach(function (t) { t.stop(); });
-      streamRef.current = null;
-    }, []);
-    useEffect(function () { if (!captured) startCam(); return stopCam; }, [captured, startCam, stopCam]);
 
-    function snap() {
+    function doCapture() {
       var v = videoRef.current;
-      if (!v) { setDbg("video element null"); return; }
       var vw = v.videoWidth, vh = v.videoHeight;
-      if (!vw || !vh) { setDbg("videoWidth=0 (kamera belum siap)"); return; }
-      setFlashing(true); setTimeout(function(){ setFlashing(false); }, 220);
-
       var r = RATIOS[ratio], sw = vw, sh = vw / r;
       if (sh > vh) { sh = vh; sw = vh * r; }
       var sx = (vw - sw)/2, sy = (vh - sh)/2;
-      var maxSide = 720, scale = Math.min(1, maxSide / Math.max(sw, sh));
+      var maxSide = 900, scale = Math.min(1, maxSide / Math.max(sw, sh));
       var cw = Math.round(sw*scale), ch = Math.round(sh*scale);
-
-      var canvas = document.createElement("canvas");
+      var canvas = canvasRef.current || document.createElement("canvas");
+      canvasRef.current = canvas;
       canvas.width = cw; canvas.height = ch;
       var ctx = canvas.getContext("2d");
-      try {
-        ctx.drawImage(v, sx, sy, sw, sh, 0, 0, cw, ch);
-      } catch (ex) {
-        setDbg("drawImage gagal: " + ex.message); return;
+      ctx.drawImage(v, sx, sy, sw, sh, 0, 0, cw, ch);
+      // grain
+      var grain = ctx.createImageData(cw, ch);
+      for (var i=0; i<grain.data.length; i+=4) {
+        var n = (Math.random()*255)|0;
+        grain.data[i]=grain.data[i+1]=grain.data[i+2]=n;
+        grain.data[i+3] = Math.random()<0.06 ? 20 : 0;
       }
-
-      // brightness check
-      var avg = -1;
-      try {
-        var s = ctx.getImageData(0, 0, Math.min(cw,40), Math.min(ch,40)).data;
-        var lum = 0; for (var k=0; k<s.length; k+=4) lum += s[k]+s[k+1]+s[k+2];
-        avg = Math.round(lum / (s.length/4) / 3);
-      } catch (ex2) {
-        setDbg("getImageData gagal (tainted?): " + ex2.message);
-      }
-
-      var url;
-      try { url = canvas.toDataURL("image/jpeg", 0.7); }
-      catch (ex3) { setDbg("toDataURL gagal: " + ex3.message); return; }
-
-      setDbg("video " + vw + "x" + vh + " | crop " + Math.round(sw) + "x" + Math.round(sh) + " | brightness " + avg + " | dataURL " + url.length + " char");
-      setCaptured(url);
-      stopCam();
+      ctx.globalAlpha = 0.5; ctx.putImageData(grain,0,0); ctx.globalAlpha = 1;
+      return canvas.toDataURL("image/jpeg", 0.72);
     }
-    function retake() { setCaptured(null); setNote(""); }
+
+    function snap() {
+      var v = videoRef.current;
+      if (!v || !v.videoWidth || !ready) return;
+      setFlashing(true);
+      // wait one painted frame, then capture, then stop stream
+      var grab = function () {
+        var url = doCapture();
+        if (streamRef.current) { streamRef.current.getTracks().forEach(function(t){ t.stop(); }); streamRef.current = null; }
+        setTimeout(function(){ setFlashing(false); }, 200);
+        setCaptured(url);
+      };
+      if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(function(){ grab(); });
+      else requestAnimationFrame(function(){ grab(); });
+    }
+    function retake() { setCaptured(null); setNote(""); window.location.reload(); }
     function keep() {
       setSaving(true);
       var shot = { id: Date.now().toString(36)+Math.random().toString(36).slice(2,6), img:captured, note:note.trim(), name:name.trim(), filter:filter, ratio:ratio, t:Date.now(), stamp:nowStamp() };
@@ -207,6 +211,7 @@ window.addEventListener("error", function (e) {
       captured ? e("img", { src:captured, alt:"", style:{ width:"100%", height:"100%", objectFit:"cover", filter:FILTERS[filter] } }) : null,
       flashing ? e("div", { style:{ position:"absolute", inset:0, background:C.flash, opacity:0.9 } }) : null,
       e("div", { style:{ position:"absolute", right:10, bottom:8, color:C.stampGreen, fontSize:15, letterSpacing:1, textShadow:"0 0 4px rgba(126,224,106,0.6)" } }, nowStamp()),
+      (!captured && !ready && !err) ? e("div", { style:{ position:"absolute", inset:0, display:"grid", placeItems:"center", color:C.flash, fontSize:12, letterSpacing:1 } }, "menyiapkan kamera...") : null,
       err ? e("div", { style:{ position:"absolute", inset:0, display:"grid", placeItems:"center", padding:24, color:C.flash, textAlign:"center", fontSize:13, lineHeight:1.6 } }, err) : null
     );
 
@@ -215,7 +220,7 @@ window.addEventListener("error", function (e) {
           e(Chips, { key:"c1", options:Object.keys(RATIOS), value:ratio, onChange:setRatio }),
           e(Label, { key:"l2" }, "Filter film"),
           e(Chips, { key:"c2", options:Object.keys(FILTERS), value:filter, onChange:setFilter }),
-          e("button", { key:"snap", onClick:snap, disabled:!!err, style:Object.assign({}, bigBtn(C.red, C.flash), { opacity: err?0.4:1 }) }, "\u29bf JEPRET") ]
+          e("button", { key:"snap", onClick:snap, disabled:(!!err || !ready), style:Object.assign({}, bigBtn(C.red, C.flash), { opacity: (err||!ready)?0.4:1 }) }, ready ? "\u29bf JEPRET" : "\u29bf TUNGGU...") ]
       : [ e(Label, { key:"l3" }, "Nama kamu (opsional)"),
           e("input", { key:"in", value:name, onChange:function(ev){ setName(ev.target.value); }, placeholder:"mis. Tante Rina", style:inputStyle }),
           e(Label, { key:"l4" }, "Pesan buat pengantin"),
@@ -225,8 +230,7 @@ window.addEventListener("error", function (e) {
             e("button", { onClick:keep, disabled:saving, style:Object.assign({}, bigBtn(C.kodak, C.ink), { flex:1.6, opacity:saving?0.5:1 }) }, saving ? "..." : "\u2713 Kirim ke galeri")
           ) ];
 
-    var dbgEl = dbg ? e("div", { style:{ marginTop:10, padding:"8px 10px", background:"#fff", border:"1px solid "+C.ink, fontSize:11, lineHeight:1.5, wordBreak:"break-all" } }, "DEBUG: " + dbg) : null;
-    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), camBox, dbgEl, controls);
+    return e("div", { className:"wrap" }, e(TopBar, { onBack:p.onBack, title: captured ? "Tulis pesan" : "Kamera" }), camBox, controls);
   }
 
   function Gallery(p) {
